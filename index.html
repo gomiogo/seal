@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 适配移动端，禁止用户意外缩放导致的画布偏移 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>在线盖章工具-移动端适配版</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        :root { --primary-color: #1890ff; --bg-color: #f0f2f5; }
+        body { 
+            font-family: sans-serif; 
+            background: var(--bg-color); 
+            margin: 0; 
+            display: flex; 
+            flex-direction: column; 
+            height: 100vh; 
+            overflow: hidden; 
+            touch-action: manipulation; 
+        }
+        
+        /* 工具栏适配：支持手机换行排列 */
+        .toolbar { 
+            background: #fff; 
+            padding: 10px; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
+            display: flex; 
+            gap: 10px; 
+            align-items: center; 
+            z-index: 10; 
+            flex-wrap: wrap; 
+            justify-content: center;
+        }
+
+        .btn { 
+            padding: 8px 15px; 
+            border-radius: 4px; 
+            border: 1px solid #d9d9d9; 
+            cursor: pointer; 
+            font-weight: 500; 
+            transition: 0.3s; 
+            font-size: 14px; 
+            display: flex; 
+            align-items: center; 
+            gap: 5px; 
+            background: white;
+            white-space: nowrap;
+        }
+        .btn-primary { background: var(--primary-color); color: white; border: none; }
+        .btn-success { background: #52c41a; color: white; border: none; }
+        
+        /* 编辑区容器 */
+        .main-container { 
+            flex: 1; 
+            display: flex; 
+            justify-content: center; 
+            align-items: flex-start; 
+            padding: 15px; 
+            overflow: auto; 
+            position: relative;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        /* 画布外层限制 */
+        .canvas-wrapper { 
+            box-shadow: 0 0 20px rgba(0,0,0,0.2); 
+            background: white; 
+            position: relative;
+            touch-action: none; /* 防止拖动印章时页面跟着滚动 */
+        }
+        
+        /* 缩放比例提示 */
+        #size-tag {
+            position: fixed; background: rgba(0, 0, 0, 0.75); color: white;
+            padding: 4px 8px; border-radius: 4px; font-size: 12px;
+            pointer-events: none; display: none; z-index: 1000; transform: translate(-50%, -120%);
+        }
+
+        /* 拖拽上传遮罩 */
+        #drop-zone {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(24, 144, 255, 0.1); border: 3px dashed var(--primary-color);
+            display: none; justify-content: center; align-items: center; z-index: 100; pointer-events: none;
+        }
+        input[type="file"] { display: none; }
+        .loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); display: none; background: rgba(0,0,0,0.8); color: white; padding: 20px; border-radius: 8px; z-index: 1000; }
+
+        #status-info { width: 100%; text-align: center; font-size: 12px; color: #999; margin-top: 2px; }
+    </style>
+</head>
+<body>
+
+<div class="toolbar">
+    <button class="btn" onclick="document.getElementById('fileInput').click()">📁 上传文件 (PDF/JPG)</button>
+    <button class="btn" onclick="document.getElementById('stampInput').click()">💮 上传印章图片</button>
+    
+    <select id="orientation" class="btn" onchange="changeOrientation()">
+        <option value="portrait">竖向 A4</option>
+        <option value="landscape">横向 A4</option>
+    </select>
+    
+    <button class="btn btn-success" onclick="downloadImage()">⬇️ 下载盖章结果</button>
+    
+    <div id="status-info">请先上传文件</div>
+</div>
+
+<div class="main-container" id="container-view">
+    <div class="canvas-wrapper" id="canvas-holder">
+        <canvas id="c"></canvas>
+    </div>
+</div>
+
+<!-- 缩放提示气泡 -->
+<div id="size-tag">100%</div>
+<div id="drop-zone"><h2>释放文件开始上传</h2></div>
+<div class="loading" id="loading">处理中...</div>
+
+<!-- 隐藏的输入框 -->
+<input type="file" id="fileInput" accept=".pdf, .jpg, .jpeg">
+<input type="file" id="stampInput" accept=".png, .jpg, .jpeg">
+
+<script>
+    const canvas = new fabric.Canvas('c');
+    const sizeTag = document.getElementById('size-tag');
+    const pdfjsLib = window['pdfjs-dist/build/pdf'];
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    let originalFileName = "stamped_document";
+    const A4_RATIO = 1.414;
+    const BASE_WIDTH = 600;
+    let currentOrientation = 'portrait';
+
+    // 初始化画布及移动端自适应显示
+    function initCanvas() {
+        const container = document.getElementById('container-view');
+        const viewWidth = container.clientWidth - 30; // 屏幕宽度边距
+        
+        if (currentOrientation === 'portrait') {
+            canvas.setWidth(BASE_WIDTH);
+            canvas.setHeight(BASE_WIDTH * A4_RATIO);
+        } else {
+            canvas.setWidth(BASE_WIDTH * A4_RATIO);
+            canvas.setHeight(BASE_WIDTH);
+        }
+        
+        // 手机端自适应：如果屏幕窄，自动通过CSS缩小画布显示，不改变内部坐标
+        const canvasEl = document.querySelector('.canvas-container');
+        if (viewWidth < canvas.width) {
+            const scale = viewWidth / canvas.width;
+            canvasEl.style.transform = `scale(${scale})`;
+            canvasEl.style.transformOrigin = 'top center';
+            document.getElementById('canvas-holder').style.height = (canvas.height * scale) + 'px';
+        } else {
+            canvasEl.style.transform = 'none';
+            document.getElementById('canvas-holder').style.height = 'auto';
+        }
+        
+        canvas.setBackgroundColor('#ffffff', canvas.renderAll.bind(canvas));
+    }
+
+    window.addEventListener('resize', initCanvas);
+    initCanvas();
+
+    // 显示印章缩放百分比
+    function updateSizeTag(obj) {
+        if (!obj || obj.type !== 'image') return;
+        const scalePercent = Math.round(obj.scaleX * 100);
+        sizeTag.innerText = `缩放: ${scalePercent}%`;
+        sizeTag.style.display = 'block';
+        
+        const boundingRect = obj.getBoundingRect();
+        const canvasWrapper = document.getElementById('canvas-holder').getBoundingClientRect();
+        
+        // 动态定位
+        sizeTag.style.left = (canvasWrapper.left + boundingRect.left + boundingRect.width / 2) + 'px';
+        sizeTag.style.top = (canvasWrapper.top + boundingRect.top - 10) + 'px';
+    }
+
+    canvas.on({
+        'object:scaling': (e) => updateSizeTag(e.target),
+        'object:moving': (e) => updateSizeTag(e.target),
+        'mouse:up': () => sizeTag.style.display = 'none',
+        'touch:drag': (e) => updateSizeTag(e.target)
+    });
+
+    // 文件上传处理逻辑
+    document.getElementById('fileInput').addEventListener('change', e => handleFile(e.target.files[0]));
+
+    async function handleFile(file) {
+        if (!file) return;
+        // 获取并保存文件名，去掉后缀
+        const lastDotIndex = file.name.lastIndexOf('.');
+        originalFileName = lastDotIndex !== -1 ? file.name.substring(0, lastDotIndex) : file.name;
+        
+        showLoading(true);
+        if (file.type === 'application/pdf') {
+            const reader = new FileReader();
+            reader.onload = async function() {
+                const pdfData = new Uint8Array(this.result);
+                const pdf = await pdfjsLib.getDocument({data: pdfData}).promise;
+                const page = await pdf.getPage(1);
+                const viewport = page.getViewport({ scale: 2 });
+                const tempCanvas = document.createElement('canvas');
+                const context = tempCanvas.getContext('2d');
+                tempCanvas.height = viewport.height;
+                tempCanvas.width = viewport.width;
+                await page.render({ canvasContext: context, viewport }).promise;
+                setCanvasBackground(tempCanvas.toDataURL('image/jpeg'));
+            };
+            reader.readAsArrayBuffer(file);
+        } else {
+            const reader = new FileReader();
+            reader.onload = (f) => setCanvasBackground(f.target.result);
+            reader.readAsDataURL(file);
+        }
+    }
+
+    function setCanvasBackground(url) {
+        fabric.Image.fromURL(url, (img) => {
+            const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
+            canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas), {
+                originX: 'left', originY: 'top', scaleX: scale, scaleY: scale
+            });
+            document.getElementById('status-info').innerText = `已载入: ${originalFileName}`;
+            showLoading(false);
+        });
+    }
+
+    // 上传印章及自动去背景逻辑
+    document.getElementById('stampInput').addEventListener('change', e => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (f) => {
+            const imgEl = new Image();
+            imgEl.src = f.target.result;
+            imgEl.onload = () => {
+                const processedUrl = removeWhiteBackground(imgEl);
+                addStampToCanvas(processedUrl);
+            }
+        }
+        reader.readAsDataURL(file);
+    });
+
+    function removeWhiteBackground(imgElement) {
+        const tempCanvas = document.createElement('canvas');
+        const ctx = tempCanvas.getContext('2d');
+        tempCanvas.width = imgElement.width;
+        tempCanvas.height = imgElement.height;
+        ctx.drawImage(imgElement, 0, 0);
+        const imageData = ctx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 4) {
+            // 将白色背景（阈值220）设为透明
+            if (data[i] > 220 && data[i+1] > 220 && data[i+2] > 220) data[i + 3] = 0; 
+        }
+        ctx.putImageData(imageData, 0, 0);
+        return tempCanvas.toDataURL('image/png');
+    }
+
+    function addStampToCanvas(url) {
+        fabric.Image.fromURL(url, (img) => {
+            img.scale(0.3).set({ 
+                left: canvas.width/2 - 50, 
+                top: canvas.height/2 - 50, 
+                borderColor: '#1890ff', 
+                cornerColor: '#1890ff', 
+                cornerSize: 22, // 调大手机端控制手柄，方便操作
+                transparentCorners: false 
+            });
+            canvas.add(img);
+            canvas.setActiveObject(img);
+        });
+    }
+
+    function changeOrientation() {
+        currentOrientation = document.getElementById('orientation').value;
+        initCanvas();
+        if (canvas.backgroundImage) {
+            const bg = canvas.backgroundImage;
+            const scale = Math.min(canvas.width / bg.width, canvas.height / bg.height);
+            bg.set({ scaleX: scale, scaleY: scale });
+            canvas.renderAll();
+        }
+    }
+
+    function downloadImage() {
+        showLoading(true);
+        // 使用 multiplier: 2 确保输出图片为高清
+        const dataURL = canvas.toDataURL({ format: 'jpeg', quality: 0.9, multiplier: 2 });
+        const link = document.createElement('a');
+        link.download = `${originalFileName}_已盖章.jpg`;
+        link.href = dataURL;
+        link.click();
+        setTimeout(() => showLoading(false), 500);
+    }
+
+    function showLoading(show) { document.getElementById('loading').style.display = show ? 'block' : 'none'; }
+
+    // 拖拽上传支持
+    window.addEventListener('dragover', e => { e.preventDefault(); document.getElementById('drop-zone').style.display = 'flex'; });
+    window.addEventListener('drop', e => {
+        e.preventDefault();
+        document.getElementById('drop-zone').style.display = 'none';
+        handleFile(e.dataTransfer.files[0]);
+    });
+</script>
+
+</body>
+</html>
