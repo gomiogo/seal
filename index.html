@@ -2,8 +2,10 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <!-- 关键：设置 viewport，禁止用户意外缩放导致的操作偏移，并适配屏幕宽度 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>在线盖章工具-支持多页PDF版</title>
+    <title>在线盖章工具-多页PDF与固定印章版</title>
+    <!-- 使用更稳定的 CDN -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <style>
@@ -16,16 +18,16 @@
             flex-direction: column; 
             height: 100vh; 
             overflow: hidden; 
-            touch-action: manipulation; 
+            touch-action: manipulation; /* 优化移动端点击延迟 */
         }
         
-        /* 工具栏适配 */
+        /* 工具栏适配：在小屏幕上自动换行 */
         .toolbar { 
             background: #fff; 
             padding: 10px; 
             box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
             display: flex; 
-            gap: 10px; 
+            gap: 8px; 
             align-items: center; 
             z-index: 10; 
             flex-wrap: wrap; 
@@ -33,13 +35,13 @@
         }
 
         .btn { 
-            padding: 8px 15px; 
+            padding: 6px 12px; 
             border-radius: 4px; 
             border: 1px solid #d9d9d9; 
             cursor: pointer; 
             font-weight: 500; 
             transition: 0.3s; 
-            font-size: 14px; 
+            font-size: 13px; 
             display: flex; 
             align-items: center; 
             gap: 5px; 
@@ -60,6 +62,11 @@
             border: 1px solid #e8e8e8;
         }
         .page-info { font-size: 13px; font-weight: bold; color: #333; min-width: 40px; text-align: center;}
+
+        /* 印章选择区域适配 */
+        .stamp-selector { display: flex; gap: 8px; align-items: center; padding: 0 5px; border-left: 1px solid #eee; border-right: 1px solid #eee;}
+        .stamp-item { width: 35px; height: 35px; border: 2px solid #eee; border-radius: 4px; cursor: pointer; object-fit: contain; background: #fff; }
+        .stamp-item:hover { border-color: var(--primary-color); }
 
         /* 编辑区容器 */
         .main-container { 
@@ -95,28 +102,38 @@
         .loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); display: none; background: rgba(0,0,0,0.8); color: white; padding: 20px; border-radius: 8px; z-index: 1000; }
 
         #status-info { width: 100%; text-align: center; font-size: 12px; color: #999; margin-top: 2px; }
+
+        @media (max-width: 480px) {
+            .btn { padding: 5px 8px; font-size: 12px; }
+            .stamp-item { width: 30px; height: 30px; }
+        }
     </style>
 </head>
 <body>
 
 <div class="toolbar">
-    <button class="btn" onclick="document.getElementById('fileInput').click()">📁 上传 (PDF/JPG)</button>
+    <button class="btn" onclick="document.getElementById('fileInput').click()">📁 文件</button>
     
-    <!-- 新增：PDF多页控制器 -->
+    <!-- PDF多页控制器 -->
     <div class="pdf-controls" id="pdf-controls">
         <button class="btn btn-icon" onclick="changePage(-1)">◀</button>
         <span class="page-info" id="page-info">1/1</span>
         <button class="btn btn-icon" onclick="changePage(1)">▶</button>
     </div>
 
-    <button class="btn" onclick="document.getElementById('stampInput').click()">💮 加盖印章</button>
+    <!-- 固定印章及上传新印章 -->
+    <div class="stamp-selector">
+        <img src="" id="previewStamp1" class="stamp-item" title="印章 A" onclick="useFixedStamp(STAMP_1_DATA)">
+        <img src="" id="previewStamp2" class="stamp-item" title="印章 B" onclick="useFixedStamp(STAMP_2_DATA)">
+        <button class="btn" style="padding: 4px 8px;" onclick="document.getElementById('stampInput').click()" title="上传新印章">➕</button>
+    </div>
     
     <select id="orientation" class="btn" onchange="changeOrientation()">
         <option value="portrait">竖向 A4</option>
         <option value="landscape">横向 A4</option>
     </select>
     
-    <button class="btn btn-success" onclick="downloadImage()">⬇️ 下载结果</button>
+    <button class="btn btn-success" onclick="downloadImage()">⬇️ 下载</button>
     
     <div id="status-info">请先上传文件</div>
 </div>
@@ -135,6 +152,15 @@
 <input type="file" id="stampInput" accept=".png, .jpg, .jpeg">
 
 <script>
+    // ==========================================
+    // 固定印章 Base64 数据 (请替换为你自己的印章)
+    // ==========================================
+    const STAMP_1_DATA = "data:image/png;base64,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";
+    const STAMP_2_DATA = "data:image/png;base64,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";
+
+    document.getElementById('previewStamp1').src = STAMP_1_DATA;
+    document.getElementById('previewStamp2').src = STAMP_2_DATA;
+
     const canvas = new fabric.Canvas('c');
     const sizeTag = document.getElementById('size-tag');
     const pdfjsLib = window['pdfjs-dist/build/pdf'];
@@ -148,6 +174,10 @@
     // PDF 状态管理变量
     let currentPdfDoc = null;
     let currentPageNum = 1;
+    
+    // 【关键内存优化】：使用全局唯一的离屏Canvas进行PDF渲染，防止手机端多次翻页导致内存溢出
+    const pdfRenderCanvas = document.createElement('canvas');
+    const pdfRenderCtx = pdfRenderCanvas.getContext('2d');
 
     // 初始化画布及移动端自适应显示
     function initCanvas() {
@@ -212,16 +242,21 @@
         if (file.type === 'application/pdf') {
             const reader = new FileReader();
             reader.onload = async function() {
-                const pdfData = new Uint8Array(this.result);
-                // 加载整个 PDF 文档
-                currentPdfDoc = await pdfjsLib.getDocument({data: pdfData}).promise;
-                currentPageNum = 1; // 默认显示第一页
-                
-                // 显示分页控制器
-                document.getElementById('pdf-controls').style.display = 'flex';
-                
-                // 渲染指定页
-                renderPdfPage(currentPageNum);
+                try {
+                    const pdfData = new Uint8Array(this.result);
+                    // 加载整个 PDF 文档
+                    currentPdfDoc = await pdfjsLib.getDocument({data: pdfData}).promise;
+                    currentPageNum = 1; // 默认显示第一页
+                    
+                    // 显示分页控制器
+                    document.getElementById('pdf-controls').style.display = 'flex';
+                    
+                    // 渲染指定页
+                    renderPdfPage(currentPageNum);
+                } catch (err) {
+                    alert('PDF加载失败，请检查文件或浏览器兼容性。');
+                    showLoading(false);
+                }
             };
             reader.readAsArrayBuffer(file);
         } else {
@@ -235,23 +270,30 @@
         }
     }
 
-    // 渲染 PDF 的特定页
+    // 渲染 PDF 的特定页 (带内存保护与异常捕获)
     async function renderPdfPage(num) {
         if (!currentPdfDoc) return;
         showLoading(true);
         
-        // 更新 UI 页码
-        document.getElementById('page-info').innerText = `${num}/${currentPdfDoc.numPages}`;
+        try {
+            document.getElementById('page-info').innerText = `${num}/${currentPdfDoc.numPages}`;
 
-        const page = await currentPdfDoc.getPage(num);
-        const viewport = page.getViewport({ scale: 2 }); // 放大两倍保证清晰度
-        const tempCanvas = document.createElement('canvas');
-        const context = tempCanvas.getContext('2d');
-        tempCanvas.height = viewport.height;
-        tempCanvas.width = viewport.width;
-        
-        await page.render({ canvasContext: context, viewport }).promise;
-        setBackground(tempCanvas.toDataURL('image/jpeg'));
+            const page = await currentPdfDoc.getPage(num);
+            const viewport = page.getViewport({ scale: 2 }); // 放大两倍保证清晰度
+            
+            // 使用全局 Canvas 避免手机端内存溢出
+            pdfRenderCanvas.height = viewport.height;
+            pdfRenderCanvas.width = viewport.width;
+            
+            await page.render({ canvasContext: pdfRenderCtx, viewport }).promise;
+            
+            // 转为图片设置为背景 (0.8压缩比减轻手机端渲染负担)
+            setBackground(pdfRenderCanvas.toDataURL('image/jpeg', 0.8));
+        } catch (e) {
+            console.error(e);
+            alert("页面渲染失败！");
+            showLoading(false);
+        }
     }
 
     // 翻页操作
@@ -272,12 +314,19 @@
             canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas), {
                 originX: 'left', originY: 'top', scaleX: scale, scaleY: scale
             });
-            document.getElementById('status-info').innerText = `已载入: ${originalFileName}`;
+            let txt = `已载入: ${originalFileName}`;
+            if (currentPdfDoc) txt += ` (第${currentPageNum}页)`;
+            document.getElementById('status-info').innerText = txt;
             showLoading(false);
         });
     }
 
-    // ==================== 印章上传与去背景 ====================
+    // ==================== 固定印章及自由上传印章 ====================
+    function useFixedStamp(base64Data) {
+        if (!base64Data) return;
+        addStampToCanvas(base64Data);
+    }
+
     document.getElementById('stampInput').addEventListener('change', e => {
         const file = e.target.files[0];
         if (!file) return;
