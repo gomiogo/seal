@@ -2,9 +2,8 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <!-- 适配移动端，禁止用户意外缩放导致的画布偏移 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>在线盖章工具-移动端适配版</title>
+    <title>在线盖章工具-支持多页PDF版</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <style>
@@ -20,7 +19,7 @@
             touch-action: manipulation; 
         }
         
-        /* 工具栏适配：支持手机换行排列 */
+        /* 工具栏适配 */
         .toolbar { 
             background: #fff; 
             padding: 10px; 
@@ -47,9 +46,21 @@
             background: white;
             white-space: nowrap;
         }
-        .btn-primary { background: var(--primary-color); color: white; border: none; }
         .btn-success { background: #52c41a; color: white; border: none; }
+        .btn-icon { padding: 4px 10px; font-size: 16px; }
         
+        /* PDF 分页控制器 */
+        .pdf-controls {
+            display: none; /* 默认隐藏，上传PDF后显示 */
+            align-items: center;
+            gap: 8px;
+            background: #f5f5f5;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid #e8e8e8;
+        }
+        .page-info { font-size: 13px; font-weight: bold; color: #333; min-width: 40px; text-align: center;}
+
         /* 编辑区容器 */
         .main-container { 
             flex: 1; 
@@ -62,22 +73,19 @@
             -webkit-overflow-scrolling: touch;
         }
 
-        /* 画布外层限制 */
         .canvas-wrapper { 
             box-shadow: 0 0 20px rgba(0,0,0,0.2); 
             background: white; 
             position: relative;
-            touch-action: none; /* 防止拖动印章时页面跟着滚动 */
+            touch-action: none; 
         }
         
-        /* 缩放比例提示 */
         #size-tag {
             position: fixed; background: rgba(0, 0, 0, 0.75); color: white;
             padding: 4px 8px; border-radius: 4px; font-size: 12px;
             pointer-events: none; display: none; z-index: 1000; transform: translate(-50%, -120%);
         }
 
-        /* 拖拽上传遮罩 */
         #drop-zone {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(24, 144, 255, 0.1); border: 3px dashed var(--primary-color);
@@ -92,15 +100,23 @@
 <body>
 
 <div class="toolbar">
-    <button class="btn" onclick="document.getElementById('fileInput').click()">📁 上传文件 (PDF/JPG)</button>
-    <button class="btn" onclick="document.getElementById('stampInput').click()">💮 上传印章图片</button>
+    <button class="btn" onclick="document.getElementById('fileInput').click()">📁 上传 (PDF/JPG)</button>
+    
+    <!-- 新增：PDF多页控制器 -->
+    <div class="pdf-controls" id="pdf-controls">
+        <button class="btn btn-icon" onclick="changePage(-1)">◀</button>
+        <span class="page-info" id="page-info">1/1</span>
+        <button class="btn btn-icon" onclick="changePage(1)">▶</button>
+    </div>
+
+    <button class="btn" onclick="document.getElementById('stampInput').click()">💮 加盖印章</button>
     
     <select id="orientation" class="btn" onchange="changeOrientation()">
         <option value="portrait">竖向 A4</option>
         <option value="landscape">横向 A4</option>
     </select>
     
-    <button class="btn btn-success" onclick="downloadImage()">⬇️ 下载盖章结果</button>
+    <button class="btn btn-success" onclick="downloadImage()">⬇️ 下载结果</button>
     
     <div id="status-info">请先上传文件</div>
 </div>
@@ -111,12 +127,10 @@
     </div>
 </div>
 
-<!-- 缩放提示气泡 -->
 <div id="size-tag">100%</div>
 <div id="drop-zone"><h2>释放文件开始上传</h2></div>
 <div class="loading" id="loading">处理中...</div>
 
-<!-- 隐藏的输入框 -->
 <input type="file" id="fileInput" accept=".pdf, .jpg, .jpeg">
 <input type="file" id="stampInput" accept=".png, .jpg, .jpeg">
 
@@ -131,10 +145,14 @@
     const BASE_WIDTH = 600;
     let currentOrientation = 'portrait';
 
+    // PDF 状态管理变量
+    let currentPdfDoc = null;
+    let currentPageNum = 1;
+
     // 初始化画布及移动端自适应显示
     function initCanvas() {
         const container = document.getElementById('container-view');
-        const viewWidth = container.clientWidth - 30; // 屏幕宽度边距
+        const viewWidth = container.clientWidth - 30; 
         
         if (currentOrientation === 'portrait') {
             canvas.setWidth(BASE_WIDTH);
@@ -144,7 +162,6 @@
             canvas.setHeight(BASE_WIDTH);
         }
         
-        // 手机端自适应：如果屏幕窄，自动通过CSS缩小画布显示，不改变内部坐标
         const canvasEl = document.querySelector('.canvas-container');
         if (viewWidth < canvas.width) {
             const scale = viewWidth / canvas.width;
@@ -172,7 +189,6 @@
         const boundingRect = obj.getBoundingRect();
         const canvasWrapper = document.getElementById('canvas-holder').getBoundingClientRect();
         
-        // 动态定位
         sizeTag.style.left = (canvasWrapper.left + boundingRect.left + boundingRect.width / 2) + 'px';
         sizeTag.style.top = (canvasWrapper.top + boundingRect.top - 10) + 'px';
     }
@@ -184,12 +200,11 @@
         'touch:drag': (e) => updateSizeTag(e.target)
     });
 
-    // 文件上传处理逻辑
+    // ==================== 文件处理与 PDF 分页核心 ====================
     document.getElementById('fileInput').addEventListener('change', e => handleFile(e.target.files[0]));
 
     async function handleFile(file) {
         if (!file) return;
-        // 获取并保存文件名，去掉后缀
         const lastDotIndex = file.name.lastIndexOf('.');
         originalFileName = lastDotIndex !== -1 ? file.name.substring(0, lastDotIndex) : file.name;
         
@@ -198,25 +213,60 @@
             const reader = new FileReader();
             reader.onload = async function() {
                 const pdfData = new Uint8Array(this.result);
-                const pdf = await pdfjsLib.getDocument({data: pdfData}).promise;
-                const page = await pdf.getPage(1);
-                const viewport = page.getViewport({ scale: 2 });
-                const tempCanvas = document.createElement('canvas');
-                const context = tempCanvas.getContext('2d');
-                tempCanvas.height = viewport.height;
-                tempCanvas.width = viewport.width;
-                await page.render({ canvasContext: context, viewport }).promise;
-                setCanvasBackground(tempCanvas.toDataURL('image/jpeg'));
+                // 加载整个 PDF 文档
+                currentPdfDoc = await pdfjsLib.getDocument({data: pdfData}).promise;
+                currentPageNum = 1; // 默认显示第一页
+                
+                // 显示分页控制器
+                document.getElementById('pdf-controls').style.display = 'flex';
+                
+                // 渲染指定页
+                renderPdfPage(currentPageNum);
             };
             reader.readAsArrayBuffer(file);
         } else {
+            // 如果是普通图片，隐藏 PDF 控制器
+            currentPdfDoc = null;
+            document.getElementById('pdf-controls').style.display = 'none';
+            
             const reader = new FileReader();
-            reader.onload = (f) => setCanvasBackground(f.target.result);
+            reader.onload = (f) => setBackground(f.target.result);
             reader.readAsDataURL(file);
         }
     }
 
-    function setCanvasBackground(url) {
+    // 渲染 PDF 的特定页
+    async function renderPdfPage(num) {
+        if (!currentPdfDoc) return;
+        showLoading(true);
+        
+        // 更新 UI 页码
+        document.getElementById('page-info').innerText = `${num}/${currentPdfDoc.numPages}`;
+
+        const page = await currentPdfDoc.getPage(num);
+        const viewport = page.getViewport({ scale: 2 }); // 放大两倍保证清晰度
+        const tempCanvas = document.createElement('canvas');
+        const context = tempCanvas.getContext('2d');
+        tempCanvas.height = viewport.height;
+        tempCanvas.width = viewport.width;
+        
+        await page.render({ canvasContext: context, viewport }).promise;
+        setBackground(tempCanvas.toDataURL('image/jpeg'));
+    }
+
+    // 翻页操作
+    function changePage(offset) {
+        if (!currentPdfDoc) return;
+        const newPage = currentPageNum + offset;
+        // 边界检查
+        if (newPage >= 1 && newPage <= currentPdfDoc.numPages) {
+            currentPageNum = newPage;
+            renderPdfPage(currentPageNum);
+        }
+    }
+
+    // 设置 Canvas 背景
+    function setBackground(url) {
         fabric.Image.fromURL(url, (img) => {
             const scale = Math.min(canvas.width / img.width, canvas.height / img.height);
             canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas), {
@@ -227,7 +277,7 @@
         });
     }
 
-    // 上传印章及自动去背景逻辑
+    // ==================== 印章上传与去背景 ====================
     document.getElementById('stampInput').addEventListener('change', e => {
         const file = e.target.files[0];
         if (!file) return;
@@ -252,7 +302,6 @@
         const imageData = ctx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
         const data = imageData.data;
         for (let i = 0; i < data.length; i += 4) {
-            // 将白色背景（阈值220）设为透明
             if (data[i] > 220 && data[i+1] > 220 && data[i+2] > 220) data[i + 3] = 0; 
         }
         ctx.putImageData(imageData, 0, 0);
@@ -266,7 +315,7 @@
                 top: canvas.height/2 - 50, 
                 borderColor: '#1890ff', 
                 cornerColor: '#1890ff', 
-                cornerSize: 22, // 调大手机端控制手柄，方便操作
+                cornerSize: 22, 
                 transparentCorners: false 
             });
             canvas.add(img);
@@ -274,6 +323,7 @@
         });
     }
 
+    // 横竖屏切换
     function changeOrientation() {
         currentOrientation = document.getElementById('orientation').value;
         initCanvas();
@@ -285,12 +335,19 @@
         }
     }
 
+    // 下载
     function downloadImage() {
         showLoading(true);
-        // 使用 multiplier: 2 确保输出图片为高清
         const dataURL = canvas.toDataURL({ format: 'jpeg', quality: 0.9, multiplier: 2 });
         const link = document.createElement('a');
-        link.download = `${originalFileName}_已盖章.jpg`;
+        
+        // 动态命名：如果PDF有多页，在文件名后标明当前是哪一页
+        let dlName = `${originalFileName}_已盖章`;
+        if (currentPdfDoc && currentPdfDoc.numPages > 1) {
+            dlName += `_第${currentPageNum}页`;
+        }
+        link.download = dlName + '.jpg';
+        
         link.href = dataURL;
         link.click();
         setTimeout(() => showLoading(false), 500);
@@ -298,7 +355,6 @@
 
     function showLoading(show) { document.getElementById('loading').style.display = show ? 'block' : 'none'; }
 
-    // 拖拽上传支持
     window.addEventListener('dragover', e => { e.preventDefault(); document.getElementById('drop-zone').style.display = 'flex'; });
     window.addEventListener('drop', e => {
         e.preventDefault();
